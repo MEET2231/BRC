@@ -159,5 +159,5 @@ def main(input_file_name="testcase.txt", output_file_name="output.txt"):
     with open(output_file_name, "w") as f:
         f.writelines(out)
 
-if _name_ == "_main_":
+if __name__ == "__main__":
     main()
