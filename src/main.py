@@ -1,163 +1,101 @@
 import math
 import mmap
 import multiprocessing
-from concurrent.futures import ThreadPoolExecutor
-import threading
+from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from typing import Dict, List, Tuple
 
-def round_inf(x):
-    return math.ceil(x * 10) / 10
+def round_up(value: float) -> float:
+    """Round up a value to one decimal place."""
+    return math.ceil(value * 10) / 10
 
-def process_lines(lines, data, lock, city_to_index):
-    """Process a list of lines and update the shared data list."""
-    local_data = []
-    local_city_to_index = {}
-    
-    for line in lines:
+def initialize_city_data() -> List[float]:
+    """Initialize city statistics: [min, max, total, count]."""
+    return [math.inf, -math.inf, 0.0, 0]
+
+def process_file_chunk(filename: str, start_offset: int, end_offset: int) -> Dict[bytes, List[float]]:
+    """Process a chunk of the file and return city statistics."""
+    city_data = defaultdict(initialize_city_data)  # Use a named function instead of lambda
+
+    with open(filename, "rb") as file:
+        with mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ) as memory_map:
+            # Adjust start offset to the beginning of the next line
+            if start_offset != 0:
+                while start_offset < len(memory_map) and memory_map[start_offset] != ord('\n'):
+                    start_offset += 1
+                start_offset += 1
+
+            # Adjust end offset to the end of the current line
+            end = end_offset
+            while end < len(memory_map) and memory_map[end] != ord('\n'):
+                end += 1
+            if end < len(memory_map):
+                end += 1
+
+            # Process the chunk
+            chunk = memory_map[start_offset:end]
+
+    for line in chunk.splitlines():
         if not line:
             continue
-        
-        semicolon_pos = line.find(b';')
-        if semicolon_pos == -1:
+
+        city, _, score_str = line.partition(b';')
+        if not score_str:
             continue
-        
-        city = line[:semicolon_pos]
-        score_str = line[semicolon_pos+1:]
-        
+
         try:
             score = float(score_str)
         except ValueError:
             continue
-        
-        # Get or create the index for the city
-        if city not in local_city_to_index:
-            local_city_to_index[city] = len(local_city_to_index)
-            local_data.append([float('inf'), float('-inf'), 0.0, 0])
-        index = local_city_to_index[city]
-        
-        # Update local_data
-        entry = local_data[index]
-        entry[0] = min(entry[0], score)
-        entry[1] = max(entry[1], score)
-        entry[2] += score
-        entry[3] += 1
-    
-    # Merge local_data into the shared data list
-    with lock:
-        for city, local_index in local_city_to_index.items():
-            if city not in city_to_index:
-                city_to_index[city] = len(city_to_index)
-                data.append([float('inf'), float('-inf'), 0.0, 0])
-            global_index = city_to_index[city]
-            
-            entry = data[global_index]
-            local_entry = local_data[local_index]
-            entry[0] = min(entry[0], local_entry[0])
-            entry[1] = max(entry[1], local_entry[1])
-            entry[2] += local_entry[2]
-            entry[3] += local_entry[3]
 
-def process_chunk(filename, start_offset, end_offset):
-    """Process a chunk of the file using threading."""
-    data = []
-    city_to_index = {}
-    lock = threading.Lock()
-    
-    with open(filename, "rb") as f:
-        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        size = len(mm)
-        
-        # Ensure the chunk starts at a line boundary
-        if start_offset != 0:
-            mm.seek(start_offset)
-            if mm.read(1) != b'\n':
-                while mm.tell() < size and mm.read(1) != b'\n':
-                    pass
-            start_offset = mm.tell()
-        
-        # Ensure the chunk ends at a line boundary
-        mm.seek(end_offset)
-        if mm.read(1) != b'\n':
-            while mm.tell() < size and mm.read(1) != b'\n':
-                pass
-            end_offset = mm.tell()
-        
-        chunk = mm[start_offset:end_offset]
-        mm.close()
-    
-    # Split the chunk into lines
-    lines = chunk.split(b'\n')
-    
-    # Distribute lines among threads
-    num_threads = 4  # Adjust based on your system
-    lines_per_thread = (len(lines) + num_threads - 1) // num_threads
-    thread_args = []
-    
-    for i in range(num_threads):
-        start = i * lines_per_thread
-        end = start + lines_per_thread
-        thread_args.append((lines[start:end], data, lock, city_to_index))
-    
-    # Process lines using threading
-    with ThreadPoolExecutor(max_workers=num_threads) as executor:
-        executor.map(lambda args: process_lines(*args), thread_args)
-    
-    return data, city_to_index
+        stats = city_data[city]
+        stats[0] = min(stats[0], score)
+        stats[1] = max(stats[1], score)
+        stats[2] += score
+        stats[3] += 1
 
-def merge_data(data_list, city_to_index_list):
-    """Merge results from all chunks."""
-    final_data = []
-    final_city_to_index = {}
-    
-    for data, city_to_index in zip(data_list, city_to_index_list):
-        for city, index in city_to_index.items():
-            if city not in final_city_to_index:
-                final_city_to_index[city] = len(final_city_to_index)
-                final_data.append([float('inf'), float('-inf'), 0.0, 0])
-            final_index = final_city_to_index[city]
-            
-            entry = final_data[final_index]
-            stats = data[index]
-            entry[0] = min(entry[0], stats[0])
-            entry[1] = max(entry[1], stats[1])
-            entry[2] += stats[2]
-            entry[3] += stats[3]
-    
-    return final_data, final_city_to_index
+    return city_data
 
-def main(input_file_name="testcase.txt", output_file_name="output.txt"):
-    # Determine file size and split into chunks
-    with open(input_file_name, "rb") as f:
-        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
-        file_size = len(mm)
-        mm.close()
-    
-    num_procs = multiprocessing.cpu_count() * 2
-    chunk_size = file_size // num_procs
-    chunks = [(i * chunk_size, (i + 1) * chunk_size if i < num_procs - 1 else file_size)
-              for i in range(num_procs)]
-    
-    # Process chunks in parallel using multiprocessing
-    with multiprocessing.Pool(num_procs) as pool:
-        tasks = [(input_file_name, start, end) for start, end in chunks]
-        results = pool.starmap(process_chunk, tasks)
-    
-    # Separate data and city_to_index from results
-    data_list = [result[0] for result in results]
-    city_to_index_list = [result[1] for result in results]
-    
-    # Merge results from all chunks
-    final_data, final_city_to_index = merge_data(data_list, city_to_index_list)
-    
+def merge_city_data(data_list: List[Dict[bytes, List[float]]]) -> Dict[bytes, List[float]]:
+    """Merge city statistics from multiple chunks."""
+    final_data = defaultdict(initialize_city_data)  # Use a named function instead of lambda
+
+    for data in data_list:
+        for city, stats in data.items():
+            final_stats = final_data[city]
+            final_stats[0] = min(final_stats[0], stats[0])
+            final_stats[1] = max(final_stats[1], stats[1])
+            final_stats[2] += stats[2]
+            final_stats[3] += stats[3]
+
+    return final_data
+
+def main(input_filename: str = "testcase.txt", output_filename: str = "output.txt") -> None:
+    """Main function to process the file and generate output."""
+    with open(input_filename, "rb") as file:
+        with mmap.mmap(file.fileno(), 0, access=mmap.ACCESS_READ) as memory_map:
+            file_size = len(memory_map)
+
+    num_processes = multiprocessing.cpu_count() * 2
+    chunk_size = file_size // num_processes
+    chunks = [(input_filename, i * chunk_size, (i + 1) * chunk_size if i < num_processes - 1 else file_size)
+              for i in range(num_processes)]
+
+    with ProcessPoolExecutor(max_workers=num_processes) as executor:
+        futures = [executor.submit(process_file_chunk, *chunk) for chunk in chunks]
+        results = [future.result() for future in as_completed(futures)]
+
+    final_data = merge_city_data(results)
+
     # Generate output
-    out = []
-    for city, index in sorted(final_city_to_index.items(), key=lambda x: x[0]):
-        mn, mx, total, count = final_data[index]
-        avg = round_inf(total / count)
-        out.append(f"{city.decode()}={round_inf(mn):.1f}/{avg:.1f}/{round_inf(mx):.1f}\n")
-    
-    # Write output to file
-    with open(output_file_name, "w") as f:
-        f.writelines(out)
+    output_lines = []
+    for city in sorted(final_data.keys(), key=lambda c: c.decode()):
+        min_score, max_score, total_score, count = final_data[city]
+        average_score = round_up(total_score / count)
+        output_lines.append(f"{city.decode()}={round_up(min_score):.1f}/{average_score:.1f}/{round_up(max_score):.1f}\n")
+
+    with open(output_filename, "w") as file:
+        file.writelines(output_lines)
 
 if __name__ == "__main__":
     main()
